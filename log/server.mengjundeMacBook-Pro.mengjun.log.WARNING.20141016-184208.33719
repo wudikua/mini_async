@@ -1,8 +1,0 @@
-Log file created at: 2014/10/16 18:42:08
-Running on machine: mengjundeMacBook-Pro
-Binary: Built with gc go1.2.2 for darwin/amd64
-Log line format: [IWEF]mmdd hh:mm:ss.uuuuuu threadid file:line] msg
-W1016 18:42:08.156102 33719 server.go:15] warning glog
-E1016 18:42:08.156407 33719 server.go:16] error glog
-W1016 18:42:08.156852 33719 server.go:19] warning 2
-E1016 18:42:08.156856 33719 server.go:20] error 3

@@ -1,26 +1,37 @@
 package main
 
 import (
+	"buffer"
 	"bufio"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"github.com/golang/glog"
-	"io"
+	"github.com/julienschmidt/httprouter"
 	"net"
+	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 type TaskBufferingServer struct {
-	net  string
-	host string
-	port int
+	net   string
+	host  string
+	port  int
+	count int
+	// 同时可以处理的请求数量，大于这个数将拒绝
+	goCount int
 }
 
 var server TaskBufferingServer
 
 func (this *TaskBufferingServer) ListenAndServe() (err error) {
+	this.count = 0
+	this.goCount = 0
 	addr := fmt.Sprintf("%s:%d", this.host, this.port)
 	ln, err := net.Listen(this.net, addr)
 	if err != nil {
@@ -33,6 +44,13 @@ func (this *TaskBufferingServer) ListenAndServe() (err error) {
 		conn, err := ln.Accept()
 		if err != nil {
 			glog.Warningf("Accept Error: %s\n", err)
+			conn.Close()
+			continue
+		}
+
+		if err := this.CanAccept(); err != nil {
+			glog.Warningf("Goroutine use up\n")
+			conn.Close()
 			continue
 		}
 
@@ -42,28 +60,67 @@ func (this *TaskBufferingServer) ListenAndServe() (err error) {
 }
 
 func (this *TaskBufferingServer) ServeClient(conn net.Conn) {
-	defer conn.Close()
 	glog.Infof("Client: %s\n", conn.RemoteAddr())
-	key, val, err := parseRequest(conn)
-	if err != nil {
-		glog.Warningln("Parse ", key, " Error: ", err)
-		conn.Close()
-		return
-	}
-	glog.Infoln("Buffering queue:", key)
-	glog.Infoln("Buffering data:", val)
-	if _, err = conn.Write([]byte(":1\r\n")); err != nil {
-		glog.Warningln("Reply Success Error: ", err)
+	defer conn.Close()
+	defer this.FinishRequest()
+	r := bufio.NewReader(conn)
+	// 每个长连接对应一个线程
+	for {
+		key, val, err := parseRequest(r)
+		if err != nil {
+			glog.Warningln("Parse", key, "Error:", err)
+			return
+		}
+		glog.Infoln("Buffering queue:", key)
+		glog.Infoln("Buffering data:", val)
+
+		this.DispactherTask(key, val)
+
+		if _, err = conn.Write([]byte(":1\r\n")); err != nil {
+			glog.Warningln("Reply Success Error: ", err)
+			return
+		}
 	}
 }
 
-func parseRequest(conn io.Reader) (string, string, error) {
-	r := bufio.NewReader(conn)
+func (this *TaskBufferingServer) DispactherTask(key string, val string) {
+	this.count = this.count + 1
+	glog.Infoln("Accept Count", this.count)
+	switch key {
+	case "redis-buffering":
+		buffer.RedisBuffer.EnQueue(val)
+		break
+	case "fcgi-buffering":
+	case "http-buffering":
+	case "moa-buffering":
+	}
+}
+
+func (this *TaskBufferingServer) Destory() {
+	buffer.RedisBuffer.Destory()
+}
+
+func (this *TaskBufferingServer) CanAccept() error {
+	if this.goCount > 1024 {
+		return errors.New("Conn Use up")
+	}
+	this.goCount = this.goCount + 1
+	return nil
+}
+
+func (this *TaskBufferingServer) FinishRequest() error {
+	this.goCount = this.goCount - 1
+	return nil
+}
+
+func parseRequest(r *bufio.Reader) (string, string, error) {
 	line, err := r.ReadString('\n')
-	glog.Infoln("Request first line:", line)
-	if line == "QUIT\r\n" {
+
+	if err != nil || line == "QUIT\r\n" {
 		return "", "", errors.New("Client wanna QUIT")
 	}
+
+	glog.Infoln("Request first line:", line)
 
 	line, err = r.ReadString('R')
 	_, err = r.ReadString('\n')
@@ -108,7 +165,40 @@ func init() {
 	flag.Parse()
 }
 
+func sigHandler() {
+	ch := make(chan os.Signal)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGHUP, os.Interrupt)
+	glog.Infoln("Sig Handler Register")
+	for {
+		select {
+		case sig := <-ch:
+			glog.Infoln("Recv sig", sig)
+			server.Destory()
+			os.Exit(0)
+			break
+		}
+	}
+}
+
+func Status(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	status := make(map[string]interface{})
+	status["conections"] = server.goCount
+	status["total_count"] = server.count
+	status["redis_buffering"] = buffer.RedisBuffer.Status()
+	b, _ := json.Marshal(status)
+
+	w.Write(b)
+}
+
 func main() {
 	defer glog.Flush()
+	// 处理信号量
+	go sigHandler()
+
+	// 服务状态信息
+	router := httprouter.New()
+	router.GET("/status", Status)
+	http.ListenAndServe(":8080", router)
+
 	server.ListenAndServe()
 }
