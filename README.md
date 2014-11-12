@@ -3,7 +3,7 @@
 * 为了让异步的请求对于在线业务影响最小，开发了一个在本机的异步缓冲，它会转发异步请求，当远端消费阻塞以后通过顺序写文件来转移
 
 ## 使用
-* git clone https://git.wemomo.com/meng.jun/taskbuffering.git
+* git clone https://github.com/wudikua/mini_async
 * sh build.sh
 * php test.php
 
